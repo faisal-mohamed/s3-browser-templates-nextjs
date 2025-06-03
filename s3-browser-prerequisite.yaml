@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for creating identity-bearer-role and idc-bootstrap-role'
+
+Parameters:
+  AccountId:
+    Type: String
+    Description: The AWS Account ID of the S3 Browser 
+    Default: ''
+  
+  ClouSecMainAccountRoleName:
+    Type: String
+    Description: Enter the S3 Browser Main Role Name
+    Default: s3-browser-main-role
+
+Resources:
+  # Stage 1: Create the idc-bootstrap-role first
+  IdcBootstrapRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: s3-idc-bootstrap-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AccountId}:role/${ClouSecMainAccountRoleName}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: IdcBootstrapPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sso-oauth:CreateTokenWithIAM
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetContext
+                Resource: !Sub arn:aws:iam::${AccountId}:role/clousec-identity-bearer-role
+
+  # Stage 2: Create the identity-bearer-role
+  IdentityBearerRole:
+    Type: AWS::IAM::Role
+    DependsOn: IdcBootstrapRole
+    Properties:
+      RoleName: s3-identity-bearer-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt IdcBootstrapRole.Arn
+            Action: 
+              - sts:AssumeRole
+              - sts:SetContext
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AccountId}:role/${ClouSecMainAccountRoleName}
+            Action: 
+              - sts:AssumeRole
+              - sts:SetContext
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      Policies:
+        - PolicyName: S3AccessGrantsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetDataAccess
+                  - s3:ListCallerAccessGrants
+                Resource: '*'
+
+Outputs:
+  IdentityBearerRoleArn:
+    Description: ARN of the Identity Bearer Role
+    Value: !GetAtt IdentityBearerRole.Arn
+  
+  IdcBootstrapRoleArn:
+    Description: ARN of the IDC Bootstrap Role
+    Value: !GetAtt IdcBootstrapRole.Arn

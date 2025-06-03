@@ -1,0 +1,58 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Creates an instance profile with a role that can assume another role'
+
+Parameters:
+  AssumeRoleArn:
+    Type: String
+    Description: 'ARN of the idc bootstrap role created using the s3-browser-prerequisite template'
+    Default: ''
+
+Resources:
+  S3BrowserMainRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: s3-browser-main-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: assume-s3-browser-role
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Ref AssumeRoleArn
+      Tags:
+        - Key: Name
+          Value: s3-browser-main-role
+
+  S3BrowserInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: s3-browser-main-instance-profile
+      Roles:
+        - !Ref S3BrowserMainRole
+
+Outputs:
+  InstanceProfileArn:
+    Description: 'ARN of the created instance profile'
+    Value: !GetAtt S3BrowserInstanceProfile.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceProfileArn'
+  
+  RoleArn:
+    Description: 'ARN of the created role'
+    Value: !GetAtt S3BrowserMainRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RoleArn'
+  
+  InstanceProfileName:
+    Description: 'Name of the created instance profile'
+    Value: !Ref S3BrowserInstanceProfile
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceProfileName'

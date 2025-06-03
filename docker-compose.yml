@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  s3-browser:
+    image:   # replace with your actual image url
+    ports:
+      - '3000:3000'
+    environment:
+      VITE_AWS_IDENTITY_BEARER_ROLE_ARN: 
+      VITE_AWS_IDENTITY_APPLICATION_ARN: 
+      VITE_AWS_OIDC_CLIENT_ID: 
+      BOOTSTRAP_ROLE_ARN: 
+      VITE_AWS_REGION: 
+      VITE_COGNITO_USER_POOL_ID: 
+      VITE_COGNITO_CLIENT_ID: 
+      VITE_S3_BROWSER_ACCOUNT_ID: 
+      VITE_SERVER_URI: 
+    restart: unless-stopped
