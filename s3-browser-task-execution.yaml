@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS Fargate app with public ALB, logs, health checks, environment variables, and IAM integration
+
+Parameters:
+  ImageUrl:
+    Type: String
+    Description: Application Image URL
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where ECS and ALB will be deployed
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public Subnet 1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public Subnet 2
+
+  TaskRoleArn:
+    Type: String
+    Description: IAM Role for the ECS container (app-level permissions)
+
+  ContainerPort:
+    Type: Number
+    Default: 3000
+    Description: Port on which the containerized app is listening
+
+  ContainerCpu:
+    Type: Number
+    Default: 2048
+    Description: CPU units for the task (1024 = 1 vCPU)
+
+  ContainerMemory:
+    Type: Number
+    Default: 4096
+    Description: Memory in MB for the task
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: Number of ECS task replicas to run
+
+  VITEAWSIDENTITYBEARERROLEARN:
+    Type: String
+  VITEAWSIDENTITYAPPLICATIONARN:
+    Type: String
+  VITEAWSOIDCCLIENTID:
+    Type: String
+  BOOTSTRAPROLEARN:
+    Type: String
+  VITEAWSREGION:
+    Type: String
+  VITECOGNITOUSERPOOLID:
+    Type: String
+  VITECOGNITOCLIENTID:
+    Type: String
+  VITES3BROWSERACCOUNTID:
+    Type: String
+  VITESERVERURI:
+    Type: String
+    Default: http://localhost
+
+Resources:
+
+  S3BrowserLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/s3-browser-app
+      RetentionInDays: 7
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !Ref TaskRoleArn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ImageUrl
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/s3-browser-app
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+          Environment:
+            - Name: VITE_AWS_IDENTITY_BEARER_ROLE_ARN
+              Value: !Ref VITEAWSIDENTITYBEARERROLEARN
+            - Name: VITE_AWS_IDENTITY_APPLICATION_ARN
+              Value: !Ref VITEAWSIDENTITYAPPLICATIONARN
+            - Name: VITE_AWS_OIDC_CLIENT_ID
+              Value: !Ref VITEAWSOIDCCLIENTID
+            - Name: BOOTSTRAP_ROLE_ARN
+              Value: !Ref BOOTSTRAPROLEARN
+            - Name: VITE_AWS_REGION
+              Value: !Ref VITEAWSREGION
+            - Name: VITE_COGNITO_USER_POOL_ID
+              Value: !Ref VITECOGNITOUSERPOOLID
+            - Name: VITE_COGNITO_CLIENT_ID
+              Value: !Ref VITECOGNITOCLIENTID
+            - Name: VITE_S3_BROWSER_ACCOUNT_ID
+              Value: !Ref VITES3BROWSERACCOUNTID
+            - Name: VITE_SERVER_URI
+              Value: !Ref VITESERVERURI
+
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Service SG - allow ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public access to ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: PublicALB
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200-399
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: [!Ref ServiceSecurityGroup]
+          Subnets:
+            - !Ref PublicSubnet1
+            - !Ref PublicSubnet2
+      TaskDefinition: !Ref TaskDefinition
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  LoadBalancerDNS:
+    Description: Public DNS of the ALB
+    Value: !GetAtt LoadBalancer.DNSName

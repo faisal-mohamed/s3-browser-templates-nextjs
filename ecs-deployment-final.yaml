@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Combined CloudFormation template to deploy IAM roles, ECS Fargate service,
+  public ALB, task definitions, and all related permissions for S3 Browser.
+
+Parameters:
+  ImageUrl:
+    Type: String
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet::Id
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet::Id
+  AccountId:
+    Type: String
+  ContainerPort:
+    Type: Number
+    Default: 3000
+  ContainerCpu:
+    Type: Number
+    Default: 2048
+  ContainerMemory:
+    Type: Number
+    Default: 4096
+  DesiredCount:
+    Type: Number
+    Default: 1
+
+  # Env Vars
+  VITEAWSIDENTITYAPPLICATIONARN:
+    Type: String
+  VITEAWSOIDCCLIENTID:
+    Type: String
+  VITEAWSREGION:
+    Type: String
+  VITECOGNITOUSERPOOLID:
+    Type: String
+  VITECOGNITOCLIENTID:
+    Type: String
+  VITES3BROWSERACCOUNTID:
+    Type: String
+  VITESERVERURI:
+    Type: String
+    Default: http://localhost
+
+Resources:
+  S3BrowserMainRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: s3-browser-main-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com, ecs-tasks.amazonaws.com]
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: assume-s3-browser-role
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: '*'
+
+  S3BrowserInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: s3-browser-main-instance-profile
+      Roles: [!Ref S3BrowserMainRole]
+
+  IdcBootstrapRole:
+    Type: AWS::IAM::Role
+    DependsOn: S3BrowserMainRole
+    Properties:
+      RoleName: s3-idc-bootstrap-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt S3BrowserMainRole.Arn
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: IdcBootstrapPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [sso-oauth:CreateTokenWithIAM, sts:AssumeRole, sts:SetContext]
+                Resource: '*'
+
+  IdentityBearerRole:
+    Type: AWS::IAM::Role
+    DependsOn: IdcBootstrapRole
+    Properties:
+      RoleName: s3-identity-bearer-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt IdcBootstrapRole.Arn
+            Action: [sts:AssumeRole, sts:SetContext]
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt S3BrowserMainRole.Arn
+            Action: [sts:AssumeRole, sts:SetContext]
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      Policies:
+        - PolicyName: S3AccessGrantsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetDataAccess, s3:ListCallerAccessGrants]
+                Resource: '*'
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/s3-browser-app
+      RetentionInDays: 7
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: IdentityBearerRole
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      Cpu: !Ref ContainerCpu
+      Memory: !Ref ContainerMemory
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt S3BrowserMainRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ImageUrl
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/s3-browser-app
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+          Environment:
+            - Name: VITE_AWS_IDENTITY_BEARER_ROLE_ARN
+              Value: !GetAtt IdentityBearerRole.Arn
+            - Name: VITE_AWS_IDENTITY_APPLICATION_ARN
+              Value: !Ref VITEAWSIDENTITYAPPLICATIONARN
+            - Name: VITE_AWS_OIDC_CLIENT_ID
+              Value: !Ref VITEAWSOIDCCLIENTID
+            - Name: BOOTSTRAP_ROLE_ARN
+              Value: !GetAtt IdcBootstrapRole.Arn
+            - Name: VITE_AWS_REGION
+              Value: !Ref VITEAWSREGION
+            - Name: VITE_COGNITO_USER_POOL_ID
+              Value: !Ref VITECOGNITOUSERPOOLID
+            - Name: VITE_COGNITO_CLIENT_ID
+              Value: !Ref VITECOGNITOCLIENTID
+            - Name: VITE_S3_BROWSER_ACCOUNT_ID
+              Value: !Ref VITES3BROWSERACCOUNTID
+            - Name: VITE_SERVER_URI
+              Value: !Ref VITESERVERURI
+
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow ALB to ECS
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow public access to ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnet1, !Ref PublicSubnet2]
+      SecurityGroups: [!Ref ALBSecurityGroup]
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200-399
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref PublicSubnet1, !Ref PublicSubnet2]
+          SecurityGroups: [!Ref ServiceSecurityGroup]
+      TaskDefinition: !Ref TaskDefinition
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  LoadBalancerDNS:
+    Description: Public DNS of the ALB
+    Value: !GetAtt LoadBalancer.DNSName
